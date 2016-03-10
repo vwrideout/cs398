@@ -28,13 +28,20 @@ class DataServer:
         print time.asctime(), "Server Stops - %s:%s" % (self.name,self.port)
         
     class DataHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+        def do_GET(self):
+            print "\nGET REQUEST START:\n"
+            print self.path
+            print self.headers
+            print "\nGET REQUEST END\n"
+            self.send_response(200)
+            self.send_header('Content-type','text/html')
+            self.end_headers()
+            self.wfile.write("This server works!")
+            return   
+        
         """I believe this @property tag will allow this nested class to access the TweetIndex in DataServer"""
         @property
         def do_POST(self):
-            """The behavior of these prints is unpredictable. Sometimes they print twice and sometimes not at all."""
-            print self.path
-            print self.client_address
-            print self.command
             """This code is intended to parse the data sent from the requests.post in line 14 of views,
                 omitted because it does not run with it included.
             form = cgi.FieldStorage(
@@ -46,8 +53,23 @@ class DataServer:
             for field in form.keys():
                 print field
                 print form[field]
+                """
+                
+            print "\nPOST REQUEST START:\n"
             """
+            print self.path
+            requestheaders = self.headers
+            print requestheaders
+            contentlength = requestheaders.getheaders('content-length')
+            length = int(contentlength[0]) if contentlength else 0
+            print requestheaders
+            print self.rfile.read(length)
+            """
+            print "\nPOST REQUEST END\n"
             self.send_response(200)
+            self.send_header('Content-type','text/html')
+            self.end_headers()
+            self.wfile.write("The post works!")
             return
             
 class TweetIndex:  
