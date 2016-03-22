@@ -12,7 +12,8 @@ def index(request):
         form = TweetForm(request.POST)
         if form.is_valid():
             """Send tweet to DataServer"""
-            requests.post('http://localhost:7000/', data = {'tweet':form.cleaned_data})
+            print form.cleaned_data
+            requests.post('http://localhost:7000/', data = {'tweet':form.cleaned_data['tweet']})
             """Echo tweet back to web client"""
             return render(request, 'tweeter.html', {'form': form, 'message': form.cleaned_data })
     form = TweetForm()

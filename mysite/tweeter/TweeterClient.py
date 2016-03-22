@@ -7,10 +7,11 @@ Created on Wed Mar 09 18:53:19 2016
 import requests 
 
 if __name__ == "__main__":
+    """
     get = requests.get("http://localhost:7000/")
     print "GET Response:\n"
     print get.text
-    
-    post = requests.post("http://localhost:7000/", data = {'tweet': 'this is a #message'})
+    """
+    post = requests.post("http://localhost:7000/", data = {'tweet': 'this is a #message'}, headers={'Connection':'close'})
     print "POST Response:\n"
     print post.text
