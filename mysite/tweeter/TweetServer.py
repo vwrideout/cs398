@@ -10,7 +10,7 @@ import cgi
 import requests
 import thread
 import threading
-import time
+import urlparse
 
 class TweetServer:
     
@@ -35,10 +35,18 @@ class TweetServer:
 class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):  
         
     def do_GET(self):
-        print "\nGET REQUEST START:\n"
-        print self.path
-        print self.headers
-        print "\nGET REQUEST END\n"
+        clientPort = str(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('clientPort', None)[0])
+        clientRank = urlparse.parse_qs(urlparse.urlparse(self.path).query).get('clientRank', None)[0]
+        known = False
+        self.server.system.lock.acquire()
+        for node in self.server.system.nodes:
+            if str(node.port) == clientPort:
+                known = True
+                node.status = 0
+        if not known:
+            print "New server found at port " + str(clientPort)
+            self.server.system.nodes.append(TweetNode(clientPort,clientRank,0))
+        self.server.system.lock.release()
         self.send_response(200)
         self.send_header('Content-type','text/html')
         self.end_headers()
@@ -57,9 +65,15 @@ class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             if self.server.system.rank == 'Primary':
                 self.server.system.lock.acquire()
                 for node in self.server.system.nodes:
-                    post = requests.post("http://localhost:" + str(node.port) + "/", data = {str(field): str(form.getvalue(str(field)))}, headers={'Connection':'close'})
-                    print "POST Response:\n"
-                    print post.text
+                    if node.rank == "Secondary":
+                        try:
+                            requests.post("http://localhost:" + str(node.port) + "/", data = {str(field): str(form.getvalue(str(field)))}, headers={'Connection':'close'})
+                        except requests.exceptions.Timeout:
+                            print "Timeout when posting to Secondary at port " + str(node.port) + ". Removing."
+                            self.server.system.removeNode(node.port)
+                        except requests.exceptions.ConnectionError:
+                            print "Connection error when posting to Secondary at port " + str(node.port) + ". Removing."
+                            self.server.system.removeNode(node.port)
                 self.server.system.lock.release()
 
         temp = "the post works!"
@@ -93,11 +107,10 @@ class TweetIndex:
                     j = j + 1
                 tags.append(tag)
         for t in tags:
-            if t in self.index:
-                print "-------------TWEETINDEX----------------\nAdding " + tweet + " to tag: " + t
+            print "-------------TWEETINDEX----------------\nAdding " + tweet + " to tag: " + t
+            if t in self.index:              
                 self.index[t].append(tweet)
             else:
-                print "-------------TWEETINDEX----------------\nAdding " + tweet + " to tag: " + t
                 self.index[t] = [tweet]   
                 
 class TweetSystem:
@@ -109,11 +122,9 @@ class TweetSystem:
         self.port = port
         self.rank = rank
         self.nodes = [TweetNode(7000, 'Primary', 0), TweetNode(7001, 'Secondary', 0), TweetNode(7002, 'Secondary', 0)]
-        for i in range(0, len(self.nodes)):
-            if self.nodes[i].port == self.port:
-                self.nodes.pop(i)
-                break
-        thread.start_new_thread(self.run())
+        self.removeNode(port)
+        print "Starting run thread"
+        thread.start_new_thread(self.run,())
         
     def run(self):
         while True:
@@ -123,18 +134,23 @@ class TweetSystem:
                 self.finished = True
                 self.lock.release()
                 return
-            for i in range(0, len(self.nodes)):
+            for node in self.nodes:
                 try:
-                    r = requests.get("http://localhost:" + str(self.nodes[i].port) + "/", params={'clientport':str(self.port)}, headers={'Connection':'close'}, timeout=6.5)
-                    print "Received heartbeat response from port " + str(self.nodes[i].port)
+                    requests.get("http://localhost:" + str(node.port) + "/", params={'clientPort':str(self.port),'clientRank':str(self.rank)}, headers={'Connection':'close'}, timeout=6.5)
+                    print "Received heartbeat response from port " + str(node.port)
+                    node.status = 0
                 except requests.exceptions.Timeout:
-                    self.nodes[i].status += 1
-                    print "NO HEARTBEAT RESPONSE FROM PORT " + str(self.nodes[i].port) + ", Status:" + str(self.nodes[i].status)
-                    if self.nodes[i].status > 3:
-                        print "NODE AT PORT " + str(self.nodes[i].port) + " HAS FAILED. REMOVING."
-                        self.nodes.pop(i)
+                    node.status += 1
+                    print "NO HEARTBEAT RESPONSE FROM PORT " + str(node.port) + ", Status:" + str(node.status)
+                    if node.status > 3:
+                        print "NODE AT PORT " + str(node.port) + " HAS FAILED. REMOVING."
+                        self.removeNode(node.port)
                 except requests.exceptions.ConnectionError:
-                    print "CONNECTION ERROR ON HEARTBEAT TO PORT " + str(self.nodes[i].port)
+                    node.status += 1
+                    print "CONNECTION ERROR ON HEARTBEAT TO PORT " + str(node.port) + ", Status:" + str(node.status)
+                    if node.status > 3:
+                        print "NODE AT PORT " + str(node.port) + " HAS FAILED. REMOVING."
+                        self.removeNode(node.port)
             self.lock.release()
             
     def waitForShutdown(self):
@@ -146,6 +162,12 @@ class TweetSystem:
                 return
             self.lock.release()
             time.sleep(5)
+            
+    def removeNode(self, port):
+        for i in range(0,len(self.nodes)):
+            if self.nodes[i].port == port:
+                self.nodes.pop(i)
+                return
         
     def toString(self):
         self.lock.acquire()
@@ -160,7 +182,7 @@ class TweetNode:
     def __init__(self, port, rank, status):
         self.port = port
         self.rank = rank
-        self.status = 0
+        self.status = status
 
     def toString(self):
         return "Port:" + str(self.port) + " Rank:" + self.rank + " Status:" + str(self.status) 
