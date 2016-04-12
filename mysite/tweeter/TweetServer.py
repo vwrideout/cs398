@@ -35,6 +35,10 @@ class TweetServer:
 class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):  
         
     def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type','text/html')
+        self.end_headers()
+        self.wfile.write("This server works!")
         clientPort = str(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('clientPort', None)[0])
         clientRank = urlparse.parse_qs(urlparse.urlparse(self.path).query).get('clientRank', None)[0]
         known = False
@@ -46,14 +50,28 @@ class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         if not known:
             print "New server found at port " + str(clientPort)
             self.server.system.nodes.append(TweetNode(clientPort,clientRank,0))
+            newversion = int(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('version', None)[0])
+            if newversion < self.server.system.version and self.server.system.rank == 'Primary' and clientRank == 'Secondary':
+                print "New secondary version is out of date, updating from " + str(newversion) + " to " + str(self.server.system.version)
+                for i in range(newversion+1,self.server.system.version+1):
+                    try:
+                        requests.post("http://localhost:" + clientPort + "/", data = {'tweet': self.server.system.log[i]}, headers={'Connection':'close'})
+                    except requests.exceptions.Timeout:
+                        print "Timeout when posting to Secondary at port " + clientPort + ". Removing."
+                        self.server.system.removeNode(clientPort)
+                    except requests.exceptions.ConnectionError:
+                        print "Connection error when posting to Secondary at port " + clientPort + ". Removing."
+                        self.server.system.removeNode(clientPort)
         self.server.system.lock.release()
-        self.send_response(200)
-        self.send_header('Content-type','text/html')
-        self.end_headers()
-        self.wfile.write("This server works!")
         return   
         
-    def do_POST(self):
+    def do_POST(self):       
+        temp = "the post works!"
+        self.send_response(200)
+        self.send_header('Content-type','text/html')
+        self.send_header('Content-length',str(len(temp)))
+        self.end_headers()
+        self.wfile.write(temp)
         form = cgi.FieldStorage(
             fp=self.rfile,
             headers=self.headers,
@@ -61,29 +79,24 @@ class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                      'CONTENT_TYPE':self.headers['Content-Type'],
             })
         for field in form.keys():
-            self.server.index.add(str(form.getvalue(str(field))))  
-            if self.server.system.rank == 'Primary':
+            if(self.server.index.add(str(form.getvalue(str(field))))):                
                 self.server.system.lock.acquire()
-                for node in self.server.system.nodes:
-                    if node.rank == "Secondary":
-                        try:
-                            requests.post("http://localhost:" + str(node.port) + "/", data = {str(field): str(form.getvalue(str(field)))}, headers={'Connection':'close'})
-                        except requests.exceptions.Timeout:
-                            print "Timeout when posting to Secondary at port " + str(node.port) + ". Removing."
-                            self.server.system.removeNode(node.port)
-                        except requests.exceptions.ConnectionError:
-                            print "Connection error when posting to Secondary at port " + str(node.port) + ". Removing."
-                            self.server.system.removeNode(node.port)
+                self.server.system.version += 1
+                if self.server.system.rank == 'Primary':     
+                    self.server.system.log[self.server.system.version] = str(form.getvalue(str(field)))
+                    for node in self.server.system.nodes:
+                        if node.rank == "Secondary":
+                            try:
+                                requests.post("http://localhost:" + str(node.port) + "/", data = {str(field): str(form.getvalue(str(field)))}, headers={'Connection':'close'})
+                            except requests.exceptions.Timeout:
+                                print "Timeout when posting to Secondary at port " + str(node.port) + ". Removing."
+                                self.server.system.removeNode(node.port)
+                            except requests.exceptions.ConnectionError:
+                                print "Connection error when posting to Secondary at port " + str(node.port) + ". Removing."
+                                self.server.system.removeNode(node.port)
                 self.server.system.lock.release()
 
-        temp = "the post works!"
-        self.send_response(200)
-        self.send_header('Content-type','text/html')
-        self.send_header('Content-length',str(len(temp)))
-        self.end_headers()
-        self.wfile.write(temp)
         return
-
 
 class TweetIndex:  
     
@@ -112,10 +125,13 @@ class TweetIndex:
                 self.index[t].append(tweet)
             else:
                 self.index[t] = [tweet]   
+        return len(tags) > 0
                 
 class TweetSystem:
     
     def __init__(self, port, rank):
+        self.version = 0
+        self.log = {}
         self.running = True
         self.finished = False
         self.lock = threading.Lock()
@@ -136,7 +152,7 @@ class TweetSystem:
                 return
             for node in self.nodes:
                 try:
-                    requests.get("http://localhost:" + str(node.port) + "/", params={'clientPort':str(self.port),'clientRank':str(self.rank)}, headers={'Connection':'close'}, timeout=6.5)
+                    requests.get("http://localhost:" + str(node.port) + "/", params={'clientPort':str(self.port),'clientRank':str(self.rank),'version':str(self.version)}, headers={'Connection':'close'}, timeout=6.5)
                     print "Received heartbeat response from port " + str(node.port)
                     node.status = 0
                 except requests.exceptions.Timeout:
