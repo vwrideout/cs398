@@ -13,18 +13,26 @@ import thread
 import threading
 import urlparse
 import copy
-import os
-import json
 
 class TweetServer(BaseHTTPServer.HTTPServer,object):
     
-    def __init__(self,(name,port),handler,rank,primaryAddress,primaryPort):
+    def __init__(self,(name,port),handler,rank,primaryAddress,primaryPort,test):
         super(TweetServer,self).__init__((name,port),handler)
-        self.system = TweetSystem(name,port,rank,primaryAddress,primaryPort)
+        self.system = TweetSystem(name,port,rank,primaryAddress,primaryPort,test)
         self.lock = threading.Lock()
         self.running = True
         self.finished = False
         self.failedPrimaryPort = 0
+        self.primaryNotificationReceived = 0
+        self.electing = False
+        if test == 'ElectionTest':
+            self.ELECTIONTEST = True
+        else:
+            self.ELECTIONTEST = False
+        if test == 'PNTest':
+            self.PRIMARYNOTIFICATIONTEST = True
+        else:
+            self.PRIMARYNOTIFICATIONTEST = False
         thread.start_new_thread(self.heartbeat,())
 
     def storeTweet(self,tweet,version):
@@ -49,13 +57,14 @@ class TweetServer(BaseHTTPServer.HTTPServer,object):
         while(self.running):
             addresses = self.system.getAllAddresses()
             for address in addresses:
-                print "Sending heartbeat to  " + address[0]+str(address[1])
-                if not self.ping(address[0],address[1],'heartbeat',0):
-                    print "Heartbeat to  " + address[0]+str(address[1]) + " failed."
-                    self.nodeFailure(address[1],'Normal')   
-                else:
-                    print "Heartbeat to " + address[0]+str(address[1]) + " successful."
-                    self.system.resetStatus(address[1])
+                if not self.electing:
+                    print "Sending heartbeat to  " + address[0]+str(address[1])
+                    if not self.ping(address[0],address[1],'heartbeat',0):
+                        print "Heartbeat to  " + address[0]+str(address[1]) + " failed."
+                        self.nodeFailure(address[1],'Normal')   
+                    else:
+                        print "Heartbeat to " + address[0]+str(address[1]) + " successful."
+                        self.system.resetStatus(address[1])
             time.sleep(15)
         self.lock.acquire()
         self.finished = True
@@ -124,16 +133,28 @@ class TweetServer(BaseHTTPServer.HTTPServer,object):
             print "This node has already run this election. Exiting election thread."
             return
         self.failedPrimaryPort = ID
+        self.electing = True
         self.lock.release()
         failures = 0
         higherPorts = self.system.getHigherAddresses()
         for name,higherPort in higherPorts:
+            if self.PRIMARYNOTIFICATIONTEST:
+                time.sleep(10)
+            self.lock.acquire()
+            if self.primaryNotificationReceived == ID:
+                self.electing = False
+                self.lock.release()
+                return
+            self.lock.release()
             print "Sending election notification to " + str(name)+str(higherPort)
             if not self.ping(name,higherPort,'election',ID):
                 print "Name" + name + "Port " + str(higherPort) + " failed in election thread."
                 failures += 1
         if failures >= len(higherPorts):
             self.becomePrimary(ID)
+        self.lock.acquire()
+        self.electing = False
+        self.lock.release()
             
     def becomePrimary(self,ID):
         print "WON ELECTION, SENDING PRIMARY NOTIFICATIONS."
@@ -146,6 +167,7 @@ class TweetServer(BaseHTTPServer.HTTPServer,object):
     def newPrimary(self,port,ID):
         self.lock.acquire()
         self.failedPrimaryPort = ID
+        self.primaryNotificationReceived = ID
         self.lock.release()
         self.system.setPrimary(port)
     
@@ -179,7 +201,8 @@ class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         clientRank = str(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('clientRank', None)[0])
         version = int(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('version', None)[0])
         method = str(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('method', None)[0])
-        self.server.checkNode(clientAddress,clientPort,clientRank,version)
+        if not ((method == 'election' and self.server.ELECTIONTEST) or (method == 'newPrimary' and self.server.PRIMARYNOTIFICATIONTEST)):
+            self.server.checkNode(clientAddress,clientPort,clientRank,version)
         if method == 'election':
             print "Received election notification from port " + str(clientPort)
             ID = float(urlparse.parse_qs(urlparse.urlparse(self.path).query).get('ID', None)[0])
@@ -218,7 +241,7 @@ class TweetHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                 
 class TweetSystem:
     
-    def __init__(self, name, port, rank, primaryAddress, primaryPort):
+    def __init__(self, name, port, rank, primaryAddress, primaryPort, test):
         self.name = name
         self.port = port
         self.rank = rank
@@ -229,6 +252,10 @@ class TweetSystem:
             self.addNode(primaryAddress,primaryPort,'Primary')
         self.version = 0
         self.log = {}
+        if test == 'PrintIndex':
+            self.PRINTINDEX = True
+        else:
+            self.PRINTINDEX = False
         
     def getName(self):
         return self.name
@@ -266,15 +293,13 @@ class TweetSystem:
     
     def getPrimaryAddress(self):
         if self.rank == 'Primary':
-            return self.port
-        output = 0
+            return (self.name,self.port)
+        output = ('nowhere',0)
         self.lock.acquire()
         for node in self.nodes:
             if node.rank == 'Primary':
                 output = (node.name,node.port)
         self.lock.release()
-        if output == 0:
-            print "COULD NOT FIND PRIMARY PORT!!!"
         return output
 
     def getSecondaryAddresses(self):
@@ -314,8 +339,9 @@ class TweetSystem:
         added = self.index.add(tweet)
         if added:
             self.version += 1
-            if self.rank == 'Primary':
-                self.log[self.version] = tweet
+            self.log[self.version] = tweet
+            if self.PRINTINDEX:
+                print self.index.toString()
         self.lock.release()
         return added
         
@@ -327,6 +353,12 @@ class TweetSystem:
     def nodeExists(self,name,port):
         for node in self.nodes:
             if name == node.name and port == node.port:
+                return True
+        return False
+        
+    def portExists(self,port):
+        for node in self.nodes:
+            if node.port == port:
                 return True
         return False
         
@@ -346,6 +378,8 @@ class TweetSystem:
         
     def incrementNodeStatus(self,port):
         self.lock.acquire()
+        if not self.portExists(port):
+            return 0
         node = self.getNode(port)
         node.status += 1
         status = node.status
@@ -408,11 +442,20 @@ class TweetIndex:
                 self.index[t] = [tweet]   
         return len(tags) > 0
         
+    def toString(self):
+        output = "INDEX CONTENTS:\n"
+        for key in self.index.keys():
+            output += "#" + key + ":\n"
+            for tweet in self.index[key]:
+                output = output + tweet + "\n"
+        return output
+        
 
 if __name__ == "__main__":
     primary = raw_input("Primary server? (Y/N):")
     name = raw_input("Please enter name:")
     port = raw_input("Please enter port number:")
+    test = raw_input("Enter test string:")
     if primary == 'Y':
         rank = 'Primary'
         primaryAddress = ""
@@ -421,7 +464,7 @@ if __name__ == "__main__":
         rank = 'Secondary'
         primaryAddress = raw_input("Please enter primary address:")
         primaryPort = raw_input("Please enter primary port:")
-    httpd = TweetServer((name,int(port)), TweetHandler, rank, primaryAddress, int(primaryPort))
+    httpd = TweetServer((name,int(port)), TweetHandler, rank, primaryAddress, int(primaryPort), test)
     print time.asctime(), "Server Starts - %s:%s" % (name,port)
     print httpd.toString()
     try:
